@@ -1,0 +1,15 @@
+flowchart TB
+ T[Telegram-бот API] -->|HTTPS webhook| N[Nginx]
+ A[Администратор] -->|HTTPS| N
+ N --> API[FastAPI: Bot, Диалог, Поиск, Каталог, Profile, SQLAdmin, Аналитика]
+ P[Telethon Parser: ручной запуск] -->|MTProto| MT[Telegram MTProto]
+ P --> DB[(PostgreSQL + pgvector)]
+ P --> M[(MinIO)]
+ W[Worker: extraction / indexing / maintenance / outbox] --> DB
+ W --> M
+ W --> L[External text LLM]
+ API --> DB
+ API --> M
+ API --> L
+ W -->|sendMessage| T
+ API -.->|enqueue jobs| DB

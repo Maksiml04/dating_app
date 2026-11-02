@@ -1,0 +1,17 @@
+flowchart LR
+ WEB[Telegram webhook] --> BOT[Bot Adapter]
+ BOT --> D[Диалог FSM]
+ D --> EX[Intent + Slot extractor]
+ EX --> L[Внешняя LLM]
+ D --> PROFILE[Profile / exclusions]
+ D --> SEARCH[Поиск]
+ SEARCH --> FILTER[SQL hard filters]
+ FILTER --> HYBRID[FTS + vector + RRF]
+ HYBRID --> DIVERSE[Diversity + soft profile ranking]
+ DIVERSE --> VALID[Final validator]
+ VALID --> CATALOG[Опубликовано Каталог snapshots]
+ D --> COMPOSE[Template card composer]
+ COMPOSE --> OUTBOX[Telegram outbox]
+ OUTBOX --> SENDER[Sender worker]
+ ADMIN[SQLAdmin custom actions] --> CATALOG
+ CATALOG --> INDEX[Index job]

@@ -1,0 +1,36 @@
+sequenceDiagram
+ actor User
+ participant TG as Telegram
+ participant Bot
+ participant FSM as Диалог
+ participant LLM
+ participant SQL as PostgreSQL
+ participant Поиск
+ participant Out as Outbox Sender
+ User->>TG: Request or changed constraints
+ TG->>Bot: update_id
+ Bot->>SQL: Durable inbox, unique update_id
+ Bot-->>TG: 2xx ACK
+ Bot->>FSM: Serialize by chat; increment generation
+ FSM->>LLM: Extract intent and slots only
+ LLM-->>FSM: Untrusted structured slots
+ FSM->>FSM: Validate hard/soft/unspecified
+ alt Clarification needed, count less than 2
+  FSM->>Out: Persist bounded clarification
+ else Ready
+  FSM->>Поиск: ПоискRequest and generation
+  Поиск->>SQL: SQL eligibility on occurrence/offer/version
+  Поиск->>SQL: FTS and pgvector on eligible set
+  Поиск->>Поиск: RRF, rerank, canonical diversity
+  Поиск->>SQL: Revalidate and check generation
+  Поиск-->>FSM: Up to 3 RecommendationКандидат
+  FSM->>Out: Durable ДоставкаIntent with TTL
+  Out->>SQL: Recheck version, freshness, exclusions, generation
+  alt Valid
+   Out->>TG: sendMessage
+   TG-->>Out: ACK or ambiguous timeout
+   Out->>SQL: Delivered + impression on confirmed ACK only
+  else Stale
+   Out->>SQL: Cancel intent
+  end
+ end

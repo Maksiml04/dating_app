@@ -1,0 +1,9 @@
+flowchart LR
+ U[Пользователь в Москве] --> TG[Telegram-бот API]
+ TG <--> SYS[Система подбора свиданий]
+ ADM[Модератор / администратор] --> SYS
+ CH[Telegram-каналы] --> SYS
+ SYS --> LLM[Внешняя text LLM]
+ SYS --> LINKS[Сайт места / внешняя бронь]
+ note[Вне MVP: оплата, внутренняя бронь, дейтинг, другие города]:::muted
+ classDef muted fill:#eee,stroke:#aaa,color:#555

@@ -1,0 +1,14 @@
+stateDiagram-v2
+ [*] --> Кандидат
+ Кандидат --> InReview: moderation begins
+ InReview --> Rejected: reason
+ Rejected --> InReview: manual reopen
+ InReview --> Опубликовано: manual verification + atomic version
+ Опубликовано --> NeedsReview: source change / verification expiry
+ NeedsReview --> Опубликовано: manual re-verification + new version
+ Опубликовано --> Archived: cancellation / completed
+ NeedsReview --> Archived: cancellation / completed
+ note right of Опубликовано
+ Поиск also checks valid_until at query time.
+ Expired record is never shown even before status update.
+ end note

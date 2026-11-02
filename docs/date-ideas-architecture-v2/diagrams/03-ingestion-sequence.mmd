@@ -1,0 +1,22 @@
+sequenceDiagram
+ actor Moderator
+ participant Admin as SQLAdmin
+ participant DB as PostgreSQL
+ participant Parser as Telethon Parser
+ participant TG as Telegram MTProto
+ participant Store as MinIO
+ participant Worker
+ participant LLM as Внешняя LLM
+ Moderator->>Admin: Запустить источник
+ Admin->>DB: Создать parser_run
+ Parser->>DB: Claim run + checkpoint
+ Parser->>TG: Первый запуск: 30 дней / далее incremental + окно ревизий
+ TG-->>Parser: Сообщения, подписи, медиа, edit timestamps
+ Parser->>Store: Оригиналы и медиа
+ Parser->>DB: UPSERT (source_id, message_id), revisions
+ Parser->>DB: Enqueue extraction jobs
+ Worker->>DB: Claim job SKIP LOCKED
+ Worker->>LLM: Только текст и подписи
+ LLM-->>Worker: Structured extraction
+ Worker->>DB: Validate, normalize, candidate + evidence
+ Note over Worker,DB: Не публикует; fuzzy duplicates лишь на проверку

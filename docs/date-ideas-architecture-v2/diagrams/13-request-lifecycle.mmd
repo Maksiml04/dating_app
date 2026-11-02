@@ -1,0 +1,18 @@
+stateDiagram-v2
+ state "Поиск operation" as SEARCH {
+  [*] --> queued
+  queued --> processing
+  processing --> completed
+  processing --> failed
+  queued --> cancelled
+  processing --> cancelled: stale generation
+ }
+ state "Доставка operation" as DELIVERY {
+  [*] --> pending
+  pending --> sending
+  pending --> cancelled: stale or expired
+  sending --> delivered: Telegram ACK
+  sending --> ambiguous: ACK unknown
+  sending --> failed: confirmed failure
+  ambiguous --> failed: policy / operator
+ }

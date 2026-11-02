@@ -1,0 +1,13 @@
+flowchart TB
+ IN[Webhook update] --> DEDUP[DB unique update_id]
+ DEDUP --> Q[Durable job / outbox]
+ Q --> CLAIM[Worker claim SKIP LOCKED]
+ CLAIM --> EXEC[Execute with deadline / rate limit]
+ EXEC -->|success| DONE[Commit outcome + metrics]
+ EXEC -->|transient error| RETRY[Bounded retries + backoff]
+ RETRY --> Q
+ EXEC -->|permanent error| DLQ[Failed jobs / admin review]
+ DB[(PostgreSQL)] --> BACKUP[Daily backup + restore drill]
+ STORE[(MinIO)] --> BACKUP
+ METRICS[Latency / queue age / token cost / failures] --> ALERT[Alerts / dashboard]
+ EXEC --> METRICS

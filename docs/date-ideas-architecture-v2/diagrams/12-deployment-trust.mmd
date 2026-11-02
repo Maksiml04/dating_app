@@ -1,0 +1,16 @@
+flowchart TB
+ INTERNET[Internet] --> HTTPS[Nginx TLS]
+ HTTPS --> API[FastAPI webhook + SQLAdmin]
+ ADMIN[Authorized moderator] --> HTTPS
+ API --> AUTH[RBAC + per-user authorization]
+ AUTH --> DB[(PostgreSQL private network)]
+ PARSER[Telethon Parser] --> DB
+ WORKER[Worker] --> DB
+ API --> MINIO[(MinIO private network)]
+ WORKER --> MINIO
+ PARSER --> MINIO
+ API --> LLM[Внешняя LLM: minimal sanitized context]
+ API --> BOT[Telegram-бот API]
+ SEC[Secrets via environment / secret files, no logs] -.-> API
+ SEC -.-> PARSER
+ SEC -.-> WORKER

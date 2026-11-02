@@ -1,0 +1,11 @@
+flowchart LR
+ EVENTS[Domain events: request, clarification, delivery, feedback, click, moderation, failure] --> LOG[(analytics.events)]
+ LOG --> DEDUP[Dedup event_id; exclude test users]
+ DEDUP --> B1[B1 Choice: Подходит]
+ DEDUP --> B2[B2 Click via redirect]
+ DEDUP --> B3[B3 Time to choice]
+ DEDUP --> B4[B4 Return 7-14 days]
+ DEDUP --> B5[B5 No results]
+ DEDUP --> B6[B6 Fact accuracy]
+ DEDUP --> B7[B7 Hard constraint violations]
+ DEDUP --> B8[B8 Cost + moderation time]

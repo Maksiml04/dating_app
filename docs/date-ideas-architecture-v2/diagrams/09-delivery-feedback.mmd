@@ -1,0 +1,21 @@
+sequenceDiagram
+ actor User
+ participant Telegram
+ participant Bot
+ participant DB as PostgreSQL
+ participant Profile
+ participant Поиск
+ User->>Telegram: Other options / suitable / exclude
+ Telegram->>Bot: Opaque callback token
+ Bot->>DB: Validate owner, delivery, generation, TTL
+ alt Other options
+  Bot->>DB: Resolve shown canonical roots
+  Bot->>Поиск: Same hard constraints, new generation, exclude shown
+  Поиск-->>Bot: New recommendations or exhausted
+ else Exclude
+  Bot->>Profile: Explicit canonical exclusion
+  Profile->>DB: Resolve alias and related entity rules
+ else Suitable
+  Bot->>DB: One positive feedback per delivery_card
+ end
+ Note over Bot,DB: Stale callback cannot mutate different user's state; /new keeps profile

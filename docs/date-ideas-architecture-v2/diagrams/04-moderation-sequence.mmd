@@ -1,0 +1,18 @@
+sequenceDiagram
+ actor Moderator
+ participant Admin as SQLAdmin
+ participant Каталог as Каталог Service
+ participant DB as PostgreSQL
+ participant Jobs as Worker
+ Moderator->>Admin: Открыть candidate + источник + дубли
+ Admin->>Каталог: review(candidate_id, edits, expected_version)
+ Каталог->>DB: Проверить обязательные поля и evidence
+ alt Валидно и модератор уполномочен
+  Moderator->>Admin: Publish
+  Admin->>Каталог: publish(candidate_id, expected_version)
+  Каталог->>DB: TX: immutable publication_version + audit + index_job
+  Jobs->>DB: Обновить FTS / embedding
+ else Неполно / спорно
+  Каталог-->>Admin: Оставить in_review или reject с причиной
+ end
+ Note over Каталог,DB: Истёк valid_until: скрыть в поиске даже если индекс не обновлён

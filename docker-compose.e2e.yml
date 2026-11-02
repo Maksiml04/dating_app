@@ -1,0 +1,40 @@
+# Полностью отдельный от production Compose: без .env, без сетевого Telegram,
+# без общих томов и без опубликованных портов базы данных.
+name: dateideas-e2e
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: dateideas_test
+      POSTGRES_USER: dateideas_test
+      POSTGRES_PASSWORD: isolated-test-password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dateideas_test -d dateideas_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    # Данные тестовой БД не сохраняются между запусками.
+    tmpfs:
+      - /var/lib/postgresql/data
+  e2e:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    environment:
+      DATABASE_URL: postgresql+psycopg://dateideas_test:isolated-test-password@db:5432/dateideas_test
+      E2E_DATABASE_URL: postgresql+psycopg://dateideas_test:isolated-test-password@db:5432/dateideas_test
+      TELEGRAM_BOT_TOKEN: fake-e2e-bot-token
+      TELEGRAM_WEBHOOK_SECRET: local-e2e-webhook-secret
+      ADMIN_API_KEY: local-e2e-admin-api-key
+      # Экстрактор и эмбеддинги выключены: тест без внешних API.
+      LLM_BASE_URL: ""
+      LLM_MODEL: ""
+      EMBEDDING_BASE_URL: ""
+      EMBEDDING_MODEL: ""
+      ADMIN_PASSWORD: ""
+      ADMIN_PASSWORD_HASH: ""
+      ADMIN_SESSION_SECRET: ""
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["sh", "-ec", "alembic upgrade head --sql >/dev/null && alembic upgrade head && pytest -q -m e2e tests/test_v018_e2e.py tests/test_fr_e2e_024.py"]

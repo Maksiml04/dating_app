@@ -1,0 +1,15 @@
+stateDiagram-v2
+ [*] --> Idle
+ Idle --> Understanding: новый запрос
+ Understanding --> Clarifying: нет обязательного параметра, уточнений меньше двух
+ Clarifying --> Understanding: ответ или «неважно»
+ Understanding --> AwaitingОбратная связь: поиск поставлен в очередь; ответ доставлен
+ Understanding --> Failed: ошибка обработки запроса
+ AwaitingОбратная связь --> Understanding: другие варианты / новые условия / новый запрос
+ AwaitingОбратная связь --> AwaitingОбратная связь: положительная реакция / исключение / детали
+ Failed --> Understanding: повтор или пошаговый ввод
+ AwaitingОбратная связь --> Idle: закрыть сеанс
+ note right of Understanding
+ Поиск и отправка — отдельные асинхронные операции.
+ Новое поколение запроса отсекает устаревшие результаты.
+ end note

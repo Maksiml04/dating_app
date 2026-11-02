@@ -1,0 +1,21 @@
+# Не отправлять локальные секреты и состояния в Docker build context
+.env
+.env.*
+!.env.example
+.git
+.venv
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+**/.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.zip
+*.session
+*.session-journal
+*.sqlite
+*.db
+build/
+dist/
+*.egg-info/
