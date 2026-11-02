@@ -1,0 +1,144 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: dateideas
+      POSTGRES_USER: dateideas
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Установите POSTGRES_PASSWORD в .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dateideas -d dateideas"]
+      interval: 5s
+      retries: 15
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ':9001'
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Установите MINIO_ROOT_PASSWORD в .env}
+    volumes:
+      - minio_data:/data
+  migrate:
+    build: .
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+    command: alembic upgrade head
+    restart: 'no'
+  api:
+    build: .
+    env_file: .env
+    ports:
+      - '127.0.0.1:8000:8000'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+  dialogue_worker:
+    build: .
+    env_file: .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: python -m app.dialogue_worker
+    restart: unless-stopped
+  draft_worker:
+    build: .
+    env_file: .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: python -m app.draft_worker
+    restart: unless-stopped
+  verification_worker:
+    build: .
+    env_file: .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: python -m app.verification_worker
+    restart: unless-stopped
+  indexer_worker:
+    build: .
+    env_file: .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: python -m app.indexer --loop
+    restart: unless-stopped
+  telegram_ingest:
+    build: .
+    profiles: ["manual"]
+    env_file: .env
+    volumes:
+      - telethon_sessions:/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio:
+        condition: service_started
+    command: python -m app.telethon_ingest
+    restart: "no"
+  worker:
+    build: .
+    env_file: .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: python -m app.worker
+    restart: unless-stopped
+
+  callback_worker:
+    build: .
+    env_file: .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: python -m app.callback_answers
+    restart: unless-stopped
+  telegram_sync_worker:
+    build: .
+    profiles: ["ingest"]
+    env_file: .env
+    volumes:
+      - telethon_sessions:/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio:
+        condition: service_started
+    command: python -m app.telethon_ingest watch --interval 90 --limit 200 --edit-scan-limit 100
+    restart: unless-stopped
+  ingress:
+    image: caddy:2
+    profiles: ["ingress"]
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-localhost}
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+
+volumes:
+  postgres_data:
+  minio_data:
+  caddy_data:
+  caddy_config:
+  telethon_sessions:
