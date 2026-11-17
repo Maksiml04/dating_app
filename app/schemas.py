@@ -67,6 +67,7 @@ class PublishIn(BaseModel):
     price_kopeks: int | None = Field(default=None, ge=0)
     price_scope: Literal['pair','person'] = 'pair'
     price_is_bounded: bool = False
+    source_message_id: UUID | None = None
     @model_validator(mode='after')
     def check_times(self):
         for field in ('last_verified_at','valid_until','starts_at','ends_at','next_verification_at'):

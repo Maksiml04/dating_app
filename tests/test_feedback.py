@@ -22,8 +22,9 @@ def test_feedback_requires_impression():
 def test_feedback_accepted_for_shown_card():
     db=FakeDB(True)
     assert handle_feedback(db,update(f'fb:dislike:{uuid4()}')) is True
-    assert len(db.items)==1
-    assert db.items[0].reaction=='dislike'
+    feedbacks=[item for item in db.items if type(item).__name__=='Feedback']
+    assert len(feedbacks)==1
+    assert feedbacks[0].reaction=='dislike'
 
 def test_malformed_callback_rejected():
     assert handle_feedback(FakeDB(True),update('fb:like:bad')) is False

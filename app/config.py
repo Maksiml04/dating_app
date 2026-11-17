@@ -28,4 +28,16 @@ class Settings(BaseSettings):
     telegram_media_max_bytes: int = 8_000_000
     search_default_limit: int = 3
     moscow_timezone: str = 'Europe/Moscow'
+    webhook_rate_limit_per_minute: int = 20
+    # Раздел 9 спеки: базовые поля события. Соль обязательна для псевдонимизации;
+    # без неё user_hash не записывается вовсе.
+    analytics_salt: str = ''
+    environment: str = 'production'
+    is_test: bool = False
+    # NFR-08: сроки хранения, дни.
+    retention_dialogue_days: int = 30
+    retention_analytics_days: int = 90
+    # NFR-09: дневной бюджет вызовов LLM; 0 — без лимита.
+    llm_max_calls_per_day: int = 0
+    llm_max_output_tokens: int = 512
 settings = Settings()

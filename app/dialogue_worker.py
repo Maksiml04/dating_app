@@ -12,8 +12,10 @@ from app.llm import extract_with_llm
 from app.dialogue import extract_constraints
 from app.feedback_ranking import get_behavior_signals, reorder_by_feedback
 from app.user_controls import excluded_roots
+from app.dialogue import relax_offers, relax_markup
 from app.models import UserPreference
 from app.weather import assess_outdoors
+from app import analytics
 
 log=logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -160,6 +162,22 @@ def process_one(db, op):
         if candidates and any(getattr(c, 'indoors', None) is False for c in candidates):
             weather = assess_outdoors(req.starts_at, req.ends_at)
         answer = render_candidates(candidates, no_results_reason=reason, weather=weather)
+        parse_mode = None
+        if candidates:
+            # UI: карточки уходят в HTML-разметке; простые тексты остаются как были.
+            from app.core.rendering import render_cards_html
+            answer = render_cards_html(candidates, weather=weather)
+            parse_mode = 'HTML'
+        relax_fields = []
+        if not candidates:
+            analytics.record(db, 'no_results', chat_id=op.chat_id, request_id=operation_id,
+                             reason_code=reason)
+            # FR-08: предлагаем ослабить конкретное условие; смена только по кнопке.
+            relax_fields = relax_offers(constraints)
+            if relax_fields:
+                constraints = {**constraints, '_relax_offers': relax_fields}
+                answer += ('\n\nИли нажми кнопку — изменю только одно выбранное условие, '
+                           'остальные сохранятся:')
         if not candidates and constraints.get('query'):
             from app.user_controls import explicitly_requested_exclusion
             banned_named = explicitly_requested_exclusion(db, op.chat_id, constraints['query'])
@@ -197,7 +215,12 @@ def process_one(db, op):
     locked.claimed_at = None
     db.add(Outbox(idempotency_key=f'operation:{locked.id}', chat_id=locked.chat_id,
         generation_id=locked.generation_id, text=answer, publication_ids=ids,
+        parse_mode=parse_mode,
+        reply_markup=relax_markup(relax_fields) if relax_fields else None,
         expires_at=datetime.now(timezone.utc) + timedelta(minutes=10)))
+    if ids:
+        analytics.record(db, 'recommendation_delivered', chat_id=locked.chat_id,
+            request_id=operation_id, count=len(ids), publication_ids=ids)
     db.commit()
     return True
 
@@ -213,6 +236,8 @@ def _finish_owned(db, operation_id, token, status, error=None):
     locked.claim_token = None
     locked.last_error = error
     if status == 'failed':
+        analytics.record(db, 'request_failed', chat_id=locked.chat_id,
+                         request_id=locked.id, dependency=error)
         session = db.get(DialogueSession, locked.chat_id)
         if session is not None and session.generation_id == locked.generation_id:
             session.state = 'failed'

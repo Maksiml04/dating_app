@@ -104,6 +104,14 @@ services:
         condition: service_completed_successfully
     command: python -m app.callback_answers
     restart: unless-stopped
+  retention_worker:
+    build: .
+    env_file: .env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: python -m app.retention_worker --loop
+    restart: unless-stopped
   telegram_sync_worker:
     build: .
     profiles: ["ingest"]

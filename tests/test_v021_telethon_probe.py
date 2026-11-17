@@ -35,7 +35,9 @@ def msg(mid, text='Выставка и экскурсия'):
 
 def source(checkpoint=0, username='kuda_v_moskva'):
     return NS(id='source-1', channel_id=123, username=username,
-              last_message_id=checkpoint, enabled=True)
+              last_message_id=checkpoint, enabled=True,
+              consecutive_errors=0, next_attempt_at=None,
+              last_error=None, last_success_at=None)
 
 
 class DB:

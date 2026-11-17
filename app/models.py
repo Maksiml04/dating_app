@@ -45,6 +45,8 @@ class PublicationVersion(Base):
     valid_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     index_status: Mapped[str] = mapped_column(String(20), default='pending', nullable=False)
+    # Модератор подтверждает привязку фото исходного поста; объект хранится приватно в MinIO.
+    source_message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey('source_message.id'))
     canonical: Mapped[Canonical] = relationship()
     __table_args__ = (UniqueConstraint('canonical_id','version'), Index('ix_publication_title', 'title'),)
 
@@ -109,6 +111,10 @@ class Outbox(Base):
     status: Mapped[str] = mapped_column(String(20), default='pending', nullable=False)
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # FR-08: разметка предложений ослабить одно условие после пустой выдачи.
+    reply_markup: Mapped[dict | None] = mapped_column(JSONB)
+    # UI: 'HTML' для карточек; None — унаследованный простой текст.
+    parse_mode: Mapped[str | None] = mapped_column(String(16))
     reserved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reservation_token: Mapped[str | None] = mapped_column(String(36))
     last_error: Mapped[str | None] = mapped_column(Text)
@@ -127,6 +133,7 @@ class Feedback(Base):
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     publication_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey('publication_version.id'), nullable=False)
     reaction: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, server_default=func.now())
     callback_id: Mapped[str | None] = mapped_column(String(120), unique=True)
 
 
@@ -176,6 +183,9 @@ class TelegramSource(Base):
     last_message_id: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(Text)
+    # FR-12: ограниченные повторы с экспоненциальным backoff на источник.
+    consecutive_errors: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 class SourceMessage(Base):
@@ -258,3 +268,20 @@ class VerificationTask(Base):
         CheckConstraint("status IN ('pending','verified','needs_update','unavailable')", name='verification_status'),
         Index('ix_verification_pending', 'status', 'created_at'),
     )
+
+
+class AnalyticsEvent(Base):
+    """Продуктовое событие (раздел 9 спеки). PII запрещены: пользователь
+    псевдонимизирован HMAC-хешем chat_id, сырые тексты и полные URL не хранятся.
+    """
+    __tablename__ = 'analytics_event'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(60), nullable=False)
+    user_hash: Mapped[str | None] = mapped_column(String(64))
+    request_id: Mapped[str | None] = mapped_column(String(64))
+    environment: Mapped[str] = mapped_column(String(20), default='production', nullable=False)
+    is_test: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    __table_args__ = (Index('ix_analytics_name_time', 'name', 'occurred_at'),)

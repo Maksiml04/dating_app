@@ -21,9 +21,9 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_migration_graph_has_one_head_and_all_revisions():
     config = Config(str(ROOT / 'alembic.ini'))
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ['0015_opening_hours']
+    assert script.get_heads() == ['0019_outbox_parse_mode']
     revisions = list(script.walk_revisions())
-    assert len(revisions) == 15
+    assert len(revisions) == 19
     assert revisions[-1].revision == '0001'
     assert revisions[-1].down_revision is None
     assert revisions[-2].revision == '0002'
@@ -67,12 +67,14 @@ def test_offline_upgrade_generates_consistent_schema():
 def test_migrated_columns_match_current_models():
     # Сравниваем историческую схему плюс явно мигрирующие поля с актуальной ORM.
     additions = {
-        'feedback': {'callback_id'},
-        'publication_version': {'booking_url', 'opening_hours', 'calendar_exceptions'},
+        'feedback': {'callback_id', 'created_at'},
+        'publication_version': {'booking_url', 'opening_hours', 'calendar_exceptions',
+                                'source_message_id'},
         'canonical': {'parent_place_id'},
-        'telegram_source': {'last_success_at', 'last_error'},
+        'telegram_source': {'last_success_at', 'last_error', 'consecutive_errors',
+                            'next_attempt_at'},
         'request_operation': {'claimed_at', 'attempts', 'last_error', 'claim_token'},
-        'telegram_outbox': {'reserved_at', 'reservation_token'},
+        'telegram_outbox': {'reserved_at', 'reservation_token', 'reply_markup', 'parse_mode'},
         'source_message': {'edited_at', 'revision'},
     }
     for table_name, baseline in InitialBase.metadata.tables.items():

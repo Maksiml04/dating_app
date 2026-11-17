@@ -19,7 +19,7 @@ import asyncio
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -179,12 +179,18 @@ async def import_source(db: Any, client: Any, source: TelegramSource, *, limit: 
                     db.commit()
         source.last_success_at = datetime.now(timezone.utc)
         source.last_error = None
+        source.consecutive_errors = 0
+        source.next_attempt_at = None
         db.commit()
         result.checkpoint = int(source.last_message_id or 0)
     except Exception as exc:
         db.rollback()
         result.error = f'{type(exc).__name__}: {str(exc)[:250]}'
         source.last_error = result.error
+        # FR-12: ограниченные повторы с экспоненциальным backoff; источник
+        # пропускается до next_attempt_at, остальные продолжают работу.
+        source.consecutive_errors = int(source.consecutive_errors or 0) + 1
+        source.next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=backoff_seconds(source.consecutive_errors))
         db.commit()
         result.checkpoint = int(source.last_message_id or 0)
     return result
@@ -236,10 +242,16 @@ async def _sync_photo(db, client, msg, source_message, stats):
 
 async def sync_sources(db: Any, client: Any, *, limit: int = 200,
                        edit_scan_limit: int = 100) -> dict[str, Any]:
-    sources = db.scalars(select(TelegramSource).where(TelegramSource.enabled.is_(True))).all()
-    stats = [await import_source(db, client, source, limit=limit, edit_scan_limit=edit_scan_limit) for source in sources]
+    now = datetime.now(timezone.utc)
+    enabled = list(db.scalars(select(TelegramSource).where(TelegramSource.enabled.is_(True))).all())
+    # FR-12: источник на backoff пропускается целиком; ошибка одного источника
+    # не блокирует остальные.
+    ready = [s for s in enabled if s.next_attempt_at is None or s.next_attempt_at <= now]
+    skipped = len(enabled) - len(ready)
+    stats = [await import_source(db, client, source, limit=limit, edit_scan_limit=edit_scan_limit) for source in ready]
     return {
         'sources': len(stats),
+        'skipped_backoff': skipped,
         'fetched': sum(item.fetched for item in stats),
         'saved': sum(item.saved for item in stats),
         'edited': sum(item.edited for item in stats),
@@ -247,6 +259,12 @@ async def sync_sources(db: Any, client: Any, *, limit: int = 200,
         'errors': sum(item.error is not None for item in stats),
         'details': [item.as_dict() for item in stats],
     }
+
+
+def backoff_seconds(consecutive_errors: int, *, base: int = 60, cap: int = 3600) -> int:
+    """FR-12: экспоненциальный backoff; максимум час, не бесконечный запрет."""
+    errors = max(0, int(consecutive_errors))
+    return min(cap, base * (2 ** max(0, errors - 1)))
 
 
 def _credentials() -> tuple[int, str, str]:

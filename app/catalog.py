@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
-from app.models import AuditLog, Canonical, Occurrence, Offer, PublicationVersion
+from app.models import AuditLog, Canonical, Occurrence, Offer, PublicationVersion, SourceMessage
 from app.schemas import PublishIn
 
 def publish(db: Session, payload: PublishIn, actor: str):
@@ -13,6 +13,10 @@ def publish(db: Session, payload: PublishIn, actor: str):
         parent = db.get(Canonical, payload.parent_place_id)
         if parent is None or parent.kind != 'place' or parent.status != 'published':
             raise ValueError('Событие должно ссылаться на опубликованное место')
+    if payload.source_message_id is not None:
+        source = db.get(SourceMessage, payload.source_message_id)
+        if source is None or source.status != 'approved':
+            raise ValueError('Фото можно привязать только к проверенному исходному сообщению')
     if payload.canonical_id:
         canonical = db.get(Canonical,payload.canonical_id,with_for_update=True)
         if canonical is None: raise ValueError('Объект не найден')
@@ -35,7 +39,8 @@ def publish(db: Session, payload: PublishIn, actor: str):
         address=payload.address,indoors=payload.indoors,source_url=payload.source_url,booking_url=payload.booking_url,
         opening_hours=payload.opening_hours,calendar_exceptions=payload.calendar_exceptions,
         last_verified_at=payload.last_verified_at,next_verification_at=payload.next_verification_at,
-        valid_until=payload.valid_until,index_status='pending')
+        valid_until=payload.valid_until,index_status='pending',
+        source_message_id=payload.source_message_id)
     db.add(pub)
     db.flush()
     if payload.starts_at:
@@ -49,7 +54,8 @@ def publish(db: Session, payload: PublishIn, actor: str):
     canonical.status='published'
     db.add(AuditLog(actor=actor, action='publish', subject_id=str(canonical.id),
         details={'before':before, 'after':{'version':version,'publication_id':str(pub.id),
-                'title':pub.title,'address':pub.address,'source_url':pub.source_url},
+                'title':pub.title,'address':pub.address,'source_url':pub.source_url,
+                'source_message_id':str(payload.source_message_id) if payload.source_message_id else None},
                 'reason':'manual_verification'}))
     # Фиксация принадлежит вызывающему API: статус черновика и версия
     # публикации должны сохраняться в одной транзакции.

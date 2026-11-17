@@ -11,6 +11,7 @@ from app.llm import extract_with_llm
 from app.date_constraints import DAY_RE, relative_interval
 from app.config import settings
 from app.callback_answers import queue_answer
+from app import analytics
 
 # Исправления по умолчанию — явно заданное пользователем новое условие имеет приоритет.
 BUDGET_RE = re.compile(r'(?:до|максимум|не больше)\s*(\d[\d\s]*)\s*(?:₽|руб(?:лей|ля|ль)?|р\b)?(?=\W|$)', re.I)
@@ -145,6 +146,45 @@ def extract_constraints(message: str, previous: dict, *, resolve_dates: bool = T
     return result
 
 
+# FR-08: ослабление условий — только явное, по одной кнопке за раз, без авто-ослаблений.
+RELAXABLE = ('district', 'metro', 'indoors', 'time_period', 'budget_total_kopeks')
+RELAX_LABELS = {
+    'district': '🏘 Искать и в других районах',
+    'metro': '🚇 Искать и у других станций',
+    'indoors': '🏠 Искать и в помещении, и на улице',
+    'time_period': '🕒 Искать в любое время',
+    'budget_total_kopeks': '💰 Искать без ограничения бюджета',
+}
+
+
+def relax_offers(constraints: dict) -> list[str]:
+    """Какие явные условия пользователя можно предложить ослабить."""
+    return [field for field in RELAXABLE if field in constraints]
+
+
+def relax_markup(fields: list[str]) -> dict:
+    return {'inline_keyboard': [[{'text': RELAX_LABELS[field], 'callback_data': f'relax:{field}'}]
+                                for field in fields]}
+
+
+def apply_relax(constraints: dict, field: str) -> bool:
+    """Снимает ровно одно условие и связанные с ним слоты. Только из whitelist."""
+    if field not in RELAXABLE or field not in constraints:
+        return False
+    constraints.pop(field, None)
+    if field == 'budget_total_kopeks':
+        constraints.pop('budget_original_kopeks', None)
+        constraints.pop('budget_original_scope', None)
+    for key in ('_shown_current', '_relax_offers', '_clarifications'):
+        constraints.pop(key, None)
+    provenance = constraints.get('_provenance')
+    if isinstance(provenance, dict):
+        provenance.pop(field, None)
+        if not provenance:
+            constraints.pop('_provenance', None)
+    return True
+
+
 def clarification_question(constraints: dict) -> str | None:
     """Only one ambiguity at a time, no questionnaire."""
     if constraints.get('_past_date'):
@@ -217,6 +257,8 @@ def handle_feedback(db: Session, update: dict) -> bool:
             return False
     db.add(Feedback(chat_id=chat_id, publication_id=publication_id,
                     reaction=action, callback_id=callback_id))
+    analytics.record(db, f'recommendation_feedback_{action}', chat_id=chat_id,
+                     request_id=None, publication_id=str(publication_id))
     return True
 
 def process_update(db: Session, update: dict) -> bool:
@@ -235,6 +277,30 @@ def process_update(db: Session, update: dict) -> bool:
     db.add(Inbox(update_id=update_id,chat_id=chat_id,payload=update,status='processed'))
     if is_callback:
         data = (update.get('callback_query') or {}).get('data','')
+        if data.startswith('relax:'):
+            # FR-08: кнопка снимает ровно одно условие, предложенное после пустой
+            # выдачи, и только в текущем поколении диалога.
+            callback = update['callback_query']
+            field = data[len('relax:'):]
+            offers = (session.constraints or {}).get('_relax_offers') or []
+            valid = field in offers and field in RELAXABLE and field in (session.constraints or {})
+            callback_id = callback.get('id')
+            if valid:
+                constraints = dict(session.constraints)
+                apply_relax(constraints, field)
+                session.constraints = constraints
+                session.generation_id += 1
+                gen = session.generation_id
+                session.state = 'processing'
+                op = RequestOperation(chat_id=chat_id, generation_id=gen,
+                    status='queued', payload={'constraints': dict(constraints), 'message': ''})
+                db.add(op)
+                analytics.record(db, 'condition_relaxed', chat_id=chat_id, request_id=op.id,
+                                 field=field)
+            queue_answer(db, callback_id, 'Ищу без этого условия.' if valid
+                         else 'Это предложение устарело. Напиши новый запрос.')
+            db.commit()
+            return valid
         if data.startswith('fb:more:'):
             callback = update['callback_query']
             token = data[len('fb:more:'):]
@@ -251,9 +317,12 @@ def process_update(db: Session, update: dict) -> bool:
                 session.generation_id += 1
                 gen = session.generation_id
                 session.state = 'processing'
-                db.add(RequestOperation(chat_id=chat_id,generation_id=gen,
+                op = RequestOperation(chat_id=chat_id,generation_id=gen,
                     status='queued',payload={'constraints':dict(session.constraints),
-                                             'message':'','more':True}))
+                                             'message':'','more':True})
+                db.add(op)
+                analytics.record(db, 'alternatives_requested', chat_id=chat_id,
+                                 request_id=op.id)
             queue_answer(db, callback_id, 'Ищу другие варианты.' if valid
                          else 'Этот подбор устарел. Напиши новый запрос.')
             db.commit()
@@ -297,8 +366,12 @@ def process_update(db: Session, update: dict) -> bool:
         pubids = []
     elif text.startswith('/help'):
         answer = ('Напиши запрос свободным текстом. /new — новый подбор; '
-                  '/preferences — предпочтения; /excluded — запреты; '
-                  '/unexclude <id> — снять запрет; /delete_data — удалить данные.')
+                  '/preferences — предпочтения; /liked — места, которые понравились; '
+                  '/excluded — запреты; /unexclude <id> — снять запрет; /delete_data — удалить данные.')
+        pubids = []
+    elif text.startswith('/liked'):
+        from app.dialogue_controls import liked_summary
+        answer = liked_summary(db, chat_id)
         pubids = []
     elif text.startswith('/preferences'):
         pref = db.get(UserPreference, chat_id)
@@ -386,14 +459,21 @@ def process_update(db: Session, update: dict) -> bool:
             session.constraints.pop('_ambiguous_indoor', None)
         if question:
             session.constraints['_clarifications'] = session.constraints.get('_clarifications', 0) + 1
+            analytics.record(db, 'clarification_asked', chat_id=chat_id,
+                             index=session.constraints['_clarifications'])
         if question:
             session.state='clarifying'
             answer=question
             pubids=[]
         else:
             session.state='processing'
-            db.add(RequestOperation(chat_id=chat_id,generation_id=generation,
-                status='queued',payload={'constraints':dict(session.constraints),'message':text}))
+            op = RequestOperation(chat_id=chat_id,generation_id=generation,
+                status='queued',payload={'constraints':dict(session.constraints),'message':text})
+            db.add(op)
+            analytics.record(db, 'request_started', chat_id=chat_id, request_id=op.id,
+                is_returning=bool(previous_query),
+                conditions_present=sorted(k for k in session.constraints
+                                          if not k.startswith('_')))
             db.commit()
             return True
     db.add(Outbox(idempotency_key=f'update:{update_id}:g:{generation}',chat_id=chat_id,generation_id=generation,

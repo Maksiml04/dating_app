@@ -11,11 +11,36 @@ from app.models import Canonical, PublicationVersion, UserPreference
 from app.schemas import PublishIn, SearchRequest
 from app.search import search
 
-app=FastAPI(title='Куда сходить на свидание — API',version='0.24.0')
+app=FastAPI(title='Куда сходить на свидание — API',version='0.29.0')
+
+# Web-чат на агентном ядре: CORS для dev-сервера фронтенда (Vite, порт 5173).
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(CORSMiddleware, allow_origins=[
+    'http://localhost:5173', 'http://127.0.0.1:5173'],
+    allow_methods=['*'], allow_headers=['*'])
+from app.web_chat import router as web_chat_router
+app.include_router(web_chat_router)
 
 def admin_auth(x_admin_key: str | None = Header(None)):
     if not verify_secret(x_admin_key, settings.admin_api_key):
         raise HTTPException(403,'Администратор не авторизован')
+
+# Web-чат UI: раздаём собранный фронтенд, если он доступен (образ или локально).
+from pathlib import Path
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+
+_dist = Path(__file__).resolve().parents[1] / 'web' / 'dist'
+if (_dist / 'index.html').is_file():
+    if (_dist / 'assets').is_dir():
+        app.mount('/assets', StaticFiles(directory=_dist / 'assets'), name='assets')
+
+    @app.get('/')
+    def index():
+        # SPA: единственная точка входа; данные — только под /api.
+        return FileResponse(_dist / 'index.html',
+                            headers={'Cache-Control': 'no-cache'})
+
 
 @app.get('/health')
 def health():
@@ -31,6 +56,14 @@ def readiness(db: Session = Depends(get_db)):
     except Exception as exc:
         raise HTTPException(503, 'База данных недоступна') from exc
     return {'status': 'ready'}
+
+
+@app.get('/metrics')
+def metrics():
+    # Агрегированные счётчики без PII; предназначено для внутреннего сборщика метрик.
+    from app import metrics as registry
+    from fastapi import Response
+    return Response(content=registry.render(), media_type='text/plain; version=0.0.4; charset=utf-8')
 
 
 @app.post('/api/search')
@@ -63,6 +96,14 @@ def webhook(payload:dict,x_telegram_bot_api_secret_token:str|None=Header(None),d
     if not verify_secret(x_telegram_bot_api_secret_token, settings.telegram_webhook_secret):
         raise HTTPException(403,'Некорректный секрет webhook')
     if not isinstance(payload.get('update_id'),int): raise HTTPException(422,'Отсутствует update_id')
+    message=(payload.get('message') or payload.get('callback_query',{}).get('message') or {})
+    chat_id=(message.get('chat') or {}).get('id')
+    from app import metrics as registry
+    from app.rate_limit import allow
+    if isinstance(chat_id,int) and not allow(chat_id, limit=settings.webhook_rate_limit_per_minute):
+        registry.increment('webhook_rate_limited_total')
+        raise HTTPException(429,'Слишком много запросов, попробуйте позже')
+    registry.increment('webhook_updates_total')
     try: accepted=process_update(db,payload)
     except Exception:
         db.rollback();raise
@@ -157,6 +198,9 @@ def publish_catalog_draft(draft_id: UUID, payload: DraftPublish, db: Session = D
     if source is None or source.status != 'approved':
         raise HTTPException(409, 'Исходная публикация требует повторного одобрения')
     # Не доверяем извлечённым данным: PublishIn требует явно проверенные дату, срок и цену.
+    # Фото исходного поста модератор уже видел в приватном превью; привязываем его к карточке.
+    if payload.publication.source_message_id is None:
+        payload.publication.source_message_id = draft.source_message_id
     try:
         result = publish(db, payload.publication, actor='api-admin')
         draft.status = 'published'
@@ -166,6 +210,9 @@ def publish_catalog_draft(draft_id: UUID, payload: DraftPublish, db: Session = D
             details={'source_message_id': str(draft.source_message_id),
                      'publication_version_id':str(result['publication_version_id']),
                      'evidence': (draft.extracted or {}).get('evidence', {})}))
+        from app import analytics
+        analytics.record(db, 'candidate_published', request_id=None,
+                         candidate_id=str(draft.id), source_id=str(draft.source_message_id))
         db.commit()
         return result
     except ValueError as exc:
@@ -203,6 +250,9 @@ def reject_catalog_draft(draft_id: UUID, payload: DraftReject, db: Session = Dep
         raise HTTPException(404, 'Черновик не найден')
     try:
         reject_draft(db, draft, actor='api-admin', reason=payload.reason)
+        from app import analytics
+        analytics.record(db, 'candidate_reviewed', request_id=None,
+                         candidate_id=str(draft.id), decision='rejected')
         db.commit()
     except ValueError as exc:
         db.rollback()
@@ -263,6 +313,14 @@ def diagnostics_queues(db: Session = Depends(get_db)):
     outbox_rows = db.execute(select(Outbox.status, func.count(Outbox.id)).group_by(Outbox.status)).all()
     return {'operations': {status: count for status, count in operation_rows},
             'outbox': {status: count for status, count in outbox_rows}}
+
+
+# Продуктовая аналитика (раздел 9 спеки): агрегаты без PII.
+from app.analytics import compute_summary
+
+@app.get('/api/admin/analytics/summary', dependencies=[Depends(admin_auth)])
+def analytics_summary(days: int = 14, db: Session = Depends(get_db)):
+    return compute_summary(db, days=days)
 
 # Private media preview for moderator: S3 server is not exposed to the internet.
 from fastapi import Response

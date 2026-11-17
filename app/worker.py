@@ -25,6 +25,53 @@ SENDING_GRACE_SECONDS = 120
 MAX_SEND_ATTEMPTS = 4
 
 
+# --- FR-22: фото карточек -----------------------------------------------------
+# Медиа хранится приватно в MinIO, поэтому Telegram не может скачать её по URL.
+# Воркер читает объект и загружает его в sendPhoto как multipart. Отправка фото
+# best-effort: сбои медиа не влияют на уже подтверждённую доставку текста.
+
+TELEGRAM_PHOTO_MAX_BYTES = 10_000_000
+
+def publication_photo(db, publication_id) -> dict | None:
+    """Приватное фото публикации: байты из MinIO и проверенный заголовок."""
+    from app.models import SourceMedia
+    pub = db.get(PublicationVersion, publication_id)
+    if pub is None or pub.source_message_id is None:
+        return None
+    media = db.scalar(select(SourceMedia).where(SourceMedia.source_message_id == pub.source_message_id))
+    if media is None:
+        return None
+    from app.media_storage import client as minio_client
+    obj = minio_client().get_object(Bucket=settings.minio_bucket, Key=media.object_key)
+    try:
+        data = obj['Body'].read(TELEGRAM_PHOTO_MAX_BYTES + 1)
+    finally:
+        obj['Body'].close()
+    if not data or len(data) > TELEGRAM_PHOTO_MAX_BYTES:
+        return None
+    return {'title': pub.title, 'data': data, 'content_type': media.content_type,
+            'filename': media.object_key.rsplit('/', 1)[-1]}
+
+def send_photo(chat_id: int, photo: dict) -> bool:
+    url = f'https://api.telegram.org/bot{settings.telegram_bot_token}/sendPhoto'
+    with httpx.Client(timeout=15.0) as client:
+        response = client.post(url, data={'chat_id': chat_id, 'caption': photo['title'][:1024]},
+            files={'photo': (photo['filename'], photo['data'], photo['content_type'])})
+    return response.is_success and response.json().get('ok') is True
+
+def deliver_photos(db, locked: Outbox) -> None:
+    """Отправляем фото после подтверждённой доставки; ошибки не меняют статус outbox."""
+    if not settings.telegram_bot_token:
+        return
+    for raw_id in locked.publication_ids[:3]:
+        try:
+            photo = publication_photo(db, uuid.UUID(raw_id))
+            if photo:
+                send_photo(locked.chat_id, photo)
+        except Exception:
+            log.warning('Фото для публикации %s не отправлено', raw_id, exc_info=True)
+
+
 def recover_abandoned(db, now=None):
     """Разбираем упавшие резервы и неизвестные результаты отправки.
 
@@ -142,6 +189,8 @@ def deliver_one(db, row: Outbox, reservation_token: str | None = None):
     try:
         payload = {'chat_id': locked.chat_id, 'text': locked.text,
                    'disable_web_page_preview': True}
+        if locked.parse_mode:
+            payload['parse_mode'] = locked.parse_mode
         if locked.text.startswith('Привет!'):
             payload['reply_markup'] = {'keyboard': [[
                 {'text': 'Мастер-класс'}, {'text': 'Выставка'}],
@@ -168,6 +217,9 @@ def deliver_one(db, row: Outbox, reservation_token: str | None = None):
             rows.append([{'text':'🔄 Другие варианты',
                          'callback_data':f'fb:more:{actions[last_id]}'}])
             payload['reply_markup'] = {'inline_keyboard': rows}
+        elif locked.reply_markup:
+            # FR-08: предложения ослабить условие после пустой выдачи.
+            payload['reply_markup'] = locked.reply_markup
         with httpx.Client(timeout=10.0) as client:
             response = client.post(url, json=payload)
         data = response.json()
@@ -175,6 +227,8 @@ def deliver_one(db, row: Outbox, reservation_token: str | None = None):
             raise ValueError('Telegram прислал не JSON-object')
         if response.is_success and data.get('ok'):
             locked.status = 'delivered'
+            from app import metrics as registry
+            registry.increment('outbox_delivered_total')
             for raw_id in locked.publication_ids:
                 db.add(Impression(chat_id=locked.chat_id, publication_id=uuid.UUID(raw_id)))
             # Current selection dedup is based only on CONFIRMED deliveries.
@@ -185,6 +239,7 @@ def deliver_one(db, row: Outbox, reservation_token: str | None = None):
                     if pub:
                         seen.add(str(pub.canonical_id))
                 dialogue.constraints = {**dialogue.constraints, '_shown_current': sorted(seen)}
+            deliver_photos(db, locked)
         elif response.status_code == 429 and locked.attempts < MAX_SEND_ATTEMPTS:
             retry_after = (data.get('parameters') or {}).get('retry_after', 10)
             retry = max(1, min(int(retry_after), 60))
@@ -192,9 +247,13 @@ def deliver_one(db, row: Outbox, reservation_token: str | None = None):
             locked.next_attempt_at = datetime.now(timezone.utc) + timedelta(seconds=retry)
         elif 400 <= response.status_code < 500:
             locked.status = 'failed'
+            from app import metrics as registry
+            registry.increment('outbox_failed_total')
             locked.last_error = f'Telegram HTTP {response.status_code}'
         else:
             locked.status = 'ambiguous'
+            from app import metrics as registry
+            registry.increment('outbox_ambiguous_total')
             locked.last_error = f'Неоднозначный ответ Telegram: HTTP {response.status_code}'
     except (httpx.RequestError, ValueError, TypeError) as exc:
         locked.status = 'ambiguous'
